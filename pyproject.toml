@@ -21,7 +21,8 @@ dependencies = [
     "six (>=1.17.0,<2.0.0)",
     "simple-watchdog-timer (>=0.1.1,<0.2.0)",
     "antlr4-python3-runtime (==4.10)",
-    "graphviz (>=0.20.3,<0.21.0)"
+    "graphviz (>=0.20.3,<0.21.0)",
+    "carla (>=0.9.15,<0.10.0)"
 ]
 
 [tool.poetry]
