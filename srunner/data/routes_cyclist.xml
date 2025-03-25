@@ -1,0 +1,13 @@
+<routes>
+    <route id="0" town="Town05">
+        <waypoints>
+            <position pitch="360.0" roll="0.0" x="-111.6204833984375" y="2.821016788482666" z="0.0" />
+            <position pitch="360.0" roll="0.0" x="-61.620628356933594" y="2.699314594268799" z="0.0" />
+        </waypoints>
+        <scenarios>
+            <scenario name="CyclistMoveRight_1" type="CyclistMoveRight">
+                <trigger_point x="71.0" y="66.3" z="0.0" yaw="-179.9" />
+            </scenario>
+        </scenarios>
+    </route>
+</routes>
