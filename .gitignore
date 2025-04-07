@@ -17,3 +17,6 @@ results*.txt
 *.dot
 *.lock
 *.env
+_out/
+_renamed/
+_vid
