@@ -64,6 +64,8 @@ class custom_8(BasicScenario):
         self._attach_camera_to_ego()
 
     def _attach_camera_to_ego(self):
+        import os
+
         ego_vehicle = CarlaDataProvider.get_hero_actor()
         if ego_vehicle is None:
             raise ValueError("Ego vehicle with role_name 'hero' not found")
@@ -77,13 +79,20 @@ class custom_8(BasicScenario):
         camera_bp.set_attribute('fov', '120')
         camera_bp.set_attribute('sensor_tick', '0.1') # 20Hz
 
-        # Define camera on front hood
-        camera_transform = carla.Transform(carla.Location(x=1.5, z=2.4))
+        camera_transforms = {
+            'front': carla.Transform(carla.Location(x=1.5, z=2.4), carla.Rotation(pitch=0)),
+            'left': carla.Transform(carla.Location(x=0.0, y=-0.8, z=2.2), carla.Rotation(yaw=-90)),
+            'right': carla.Transform(carla.Location(x=0.0, y=0.8, z=2.2), carla.Rotation(yaw=90)),
+            'back': carla.Transform(carla.Location(x=-1.5, z=2.4), carla.Rotation(yaw=180))
+        }
 
-        # Spawn and attach sensor
-        camera = world.spawn_actor(camera_bp, camera_transform, attach_to=ego_vehicle)
-        camera.listen(lambda image: image.save_to_disk(f"_out/ego_{ego_vehicle.id}_%06d.png" % image.frame))
-        self._sensor_list.append(camera)
+        for view in camera_transforms.keys():
+            os.makedirs(f"_out/{view}", exist_ok=True)
+
+        for view, transform in camera_transforms.items():
+            camera = world.spawn_actor(camera_bp, transform, attach_to=ego_vehicle)
+            camera.listen(lambda image, view=view: image.save_to_disk(f"_out/{view}/ego_{ego_vehicle.id}_%06d.png" % image.frame))
+            self._sensor_list.append(camera)
     
     def _initialize_actors(self, config):
         waypoint, _ = get_waypoint_in_distance(self._reference_waypoint, self._first_vehicle_location)
