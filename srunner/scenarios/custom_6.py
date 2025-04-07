@@ -6,9 +6,9 @@
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
 """
-Obstacle avoidance without prior action.
-The ego-vehicle encounters an obstacle / unexpected entity on the road and 
-must perform an emergency brake or an avoidance maneuver.
+Obstacle avoidance with prior action - pedestrian.
+While performing a maneuver, the ego-vehicle encounters an obstacle in the road, 
+either a pedestrian or a bicycle, and must perform an emergency brake or an avoidance maneuver.
 """
 
 import random
@@ -66,6 +66,8 @@ class custom_6(BasicScenario):
         self._attach_camera_to_ego()
 
     def _attach_camera_to_ego(self):
+        import os
+        
         ego_vehicle = CarlaDataProvider.get_hero_actor()
         if ego_vehicle is None:
             raise ValueError("Ego vehicle with role_name 'hero' not found")
@@ -78,20 +80,27 @@ class custom_6(BasicScenario):
         camera_bp.set_attribute('image_size_y', '720')
         camera_bp.set_attribute('fov', '120')
 
-        # Define camera on front hood
-        camera_transform = carla.Transform(carla.Location(x=1.5, z=2.4))
+        camera_transforms = {
+            'front': carla.Transform(carla.Location(x=1.5, z=2.4), carla.Rotation(pitch=0)),
+            'left': carla.Transform(carla.Location(x=0.0, y=-0.8, z=2.2), carla.Rotation(yaw=-90)),
+            'right': carla.Transform(carla.Location(x=0.0, y=0.8, z=2.2), carla.Rotation(yaw=90)),
+            'back': carla.Transform(carla.Location(x=-1.5, z=2.4), carla.Rotation(yaw=180))
+        }
 
-        # Spawn and attach sensor
-        camera = world.spawn_actor(camera_bp, camera_transform, attach_to=ego_vehicle)
-        camera.listen(lambda image: image.save_to_disk(f"_out/ego_{ego_vehicle.id}_%06d.png" % image.frame))
-        self._sensor_list.append(camera)
+        for view in camera_transforms.keys():
+            os.makedirs(f"_out/{view}", exist_ok=True)
 
+        for view, transform in camera_transforms.items():
+            camera = world.spawn_actor(camera_bp, transform, attach_to=ego_vehicle)
+            camera.listen(lambda image, view=view: image.save_to_disk(f"_out/{view}/ego_{ego_vehicle.id}_%06d.png" % image.frame))
+            self._sensor_list.append(camera)
+    
     def _initialize_actors(self, config):
         for actor in config.other_actors:
             vehicle = CarlaDataProvider.request_new_actor(actor.model, actor.transform)
             self.other_actors.append(vehicle)
             vehicle.set_simulate_physics(enabled=True)
-   
+        
     def _create_behavior(self):
         """
         Order of sequence:
@@ -104,15 +113,16 @@ class custom_6(BasicScenario):
         # car_visible
           # let the other actor drive until next intersection
         TriggerDist = py_trees.composites.Parallel(
-            "DriveStraight",
+            "Intersection",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        TriggerDist.add_child(InTriggerDistanceToVehicle(self.other_actors[0], self.ego_vehicles[0], distance=25))
+        TriggerDist.add_child(InTriggerDistanceToNextIntersection(self.ego_vehicles[0], distance=25))
         DriveStraight = py_trees.composites.Parallel(
             "DriveStraight",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        DriveStraight.add_child(KeepVelocity(self.other_actors[0], 1))
-        DriveStraight.add_child(InTriggerDistanceToVehicle(self.other_actors[0], self.ego_vehicles[0], 40, comparison_operator=operator.gt))
+        DriveStraight.add_child(KeepVelocity(self.other_actors[0], 0.8))
+        DriveStraight.add_child(InTriggerDistanceToVehicle(self.other_actors[0], self.ego_vehicles[0], 50, comparison_operator=operator.gt))
 
+        
         sequence = py_trees.composites.Sequence("Sequence Behavior")
         sequence.add_child(TriggerDist)
         # sequence.add_child(end)

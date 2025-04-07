@@ -6,15 +6,15 @@
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
 """
-Obstacle in lane.
-The ego-vehicle encounters an obstacle blocking the lane and must perform a lane 
-change into traffic moving in the same direction to avoid it. The obstacle may be 
-a construction site, an accident or a parked vehicle.
+Longitudinal control after leading vehicle's brake.
+The leading vehicle decelerates suddenly due to an obstacle and 
+the ego-vehicle must perform an emergency brake or an avoidance maneuver.
 """
 
 import random
 import py_trees
 import carla
+from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from srunner.scenariomanager.scenarioatomics.atomic_behaviors import (ActorTransformSetter,
@@ -24,15 +24,14 @@ from srunner.scenariomanager.scenarioatomics.atomic_behaviors import (ActorTrans
                                                                       WaypointFollower,
                                                                       AccelerateToCatchUp,
                                                                       ChangeActorTargetSpeed
-                                                                       
                                                                       )
 from srunner.scenariomanager.scenarioatomics.atomic_criteria import CollisionTest
-from srunner.scenariomanager.scenarioatomics.atomic_trigger_conditions import InTriggerDistanceToVehicle, InTriggerDistanceToNextIntersection, DriveDistance
+from srunner.scenariomanager.scenarioatomics.atomic_trigger_conditions import InTriggerDistanceToVehicle, InTriggerDistanceToNextIntersection, DriveDistance,StandStill
 from srunner.scenarios.basic_scenario import BasicScenario
 from srunner.tools.scenario_helper import get_waypoint_in_distance
 
 
-class custom_1(BasicScenario):
+class custom_3(BasicScenario):
 
     """
     The ego vehicle is driving on a highway and another car is cutting in just in front.
@@ -53,8 +52,8 @@ class custom_1(BasicScenario):
         self._first_vehicle_speed = 10
         self._other_actor_stop_in_front_intersection = 10
         point = config.trigger_points[0].location
-        self._reference_waypoint = self._map.get_waypoint(point)
-        super(custom_1, self).__init__("custom_1",
+        self._grp = GlobalRoutePlanner(CarlaDataProvider.get_map(), 2.0)
+        super(custom_3, self).__init__("custom_3",
                                        ego_vehicles,
                                        config,
                                        world,
@@ -94,19 +93,11 @@ class custom_1(BasicScenario):
             self._sensor_list.append(camera)
     
     def _initialize_actors(self, config):
-        waypoint, _ = get_waypoint_in_distance(self._reference_waypoint, self._first_vehicle_location)
-        
-        waypoint_left = waypoint.get_left_lane()
-        transform = waypoint_left.transform
-        transform.location.z += 0.5
-        transform.location.x += 20
-        
-        
-        first_vehicle = CarlaDataProvider.request_new_actor('vehicle.nissan.patrol', transform)
-
-        self.other_actors.append(first_vehicle)
-        self._create_construction_setup(waypoint.transform, waypoint.lane_width)
-    
+        for actor in config.other_actors:
+            vehicle = CarlaDataProvider.request_new_actor(actor.model, actor.transform)
+            self.other_actors.append(vehicle)
+            vehicle.set_simulate_physics(enabled=True)
+            
     def _create_behavior(self):
         """
         Order of sequence:
@@ -116,29 +107,38 @@ class custom_1(BasicScenario):
         - lane_change: change the lane
         - endcondition: drive for a defined distance
         """
-
+        pos = self.other_actors[0].get_location()
+        destpos = carla.Location(10.8, -3.8, 0)
+    
+        plan = self._grp.trace_route(pos, destpos)
         # car_visible
         # let the other actor drive until next intersection
         DriveStraight = py_trees.composites.Parallel(
             "DriveStraight",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        DriveStraight.add_child(WaypointFollower(self.other_actors[0], 15))
-        DriveStraight.add_child(InTriggerDistanceToNextIntersection(
-            self.other_actors[0], self._other_actor_stop_in_front_intersection))
+        DriveStraight.add_child(WaypointFollower(self.other_actors[0], 10, plan =  plan))
+
+        DriveStraight.add_child(InTriggerDistanceToVehicle(self.ego_vehicles[0], self.other_actors[0],15))
+        
         #DriveStraight.add_child(ChangeActorTargetSpeed(self.other_actors[0],20))
-
-        # stop vehicle
-        #stop = StopVehicle(self.other_actors[0], 1.0)
-
-        # end condition
-        end = py_trees.composites.Parallel("ego reached intersection",
+        endcondition = py_trees.composites.Parallel("Waiting for end position",
                                                     policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ALL)
-        end.add_child(InTriggerDistanceToNextIntersection(
-            self.ego_vehicles[0], 1))
+        endcondition.add_child(StopVehicle(self.other_actors[0],1.0 ))
+        endcondition.add_child(InTriggerDistanceToVehicle(self.other_actors[0],
+                                                        self.ego_vehicles[0],
+                                                        distance=20))
+        endcondition.add_child(StandStill(self.ego_vehicles[0],name="FinalSpeed", duration=1))
+
+        # end = py_trees.composites.Parallel(
+        #     "DriveStraight",
+        #     policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
+        # end.add_child(InTriggerDistanceToLocation(
+        #     self.ego_vehicles[0], carla.Location(-42.9, -2.7, 0), 3))
         # end condition
         sequence = py_trees.composites.Sequence("Sequence Behavior")
         sequence.add_child(DriveStraight)
-        sequence.add_child(end)
+        # sequence.add_child(end)
+        sequence.add_child(endcondition)
         sequence.add_child(ActorDestroy(self.other_actors[0]))
 
         return sequence
@@ -148,18 +148,14 @@ class custom_1(BasicScenario):
         A list of all test criteria is created, which is later used in the parallel behavior tree.
         """
         criteria = []
-
         collision_criterion = CollisionTest(self.ego_vehicles[0])
-
         criteria.append(collision_criterion)
-
         return criteria
 
     def _create_construction_setup(self, start_transform, lane_width):
         """
         Create Construction Setup
         """
-
         _initial_offset = {'cones': {'yaw': 180, 'k': lane_width / 2.0},
                            'warning_sign': {'yaw': 180, 'k': 5, 'z': 0},
                            'debris': {'yaw': 0, 'k': 2, 'z': 1}}
@@ -187,7 +183,7 @@ class custom_1(BasicScenario):
             static.set_simulate_physics(True)
             self.other_actors.append(static)
 
-        # Cones 
+        # Cones
         side_transform = carla.Transform(
             start_transform.location,
             start_transform.rotation)

@@ -6,17 +6,14 @@
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
 """
-Obstacle avoidance with prior action - pedestrian.
-While performing a maneuver, the ego-vehicle encounters an obstacle in the road, 
-either a pedestrian or a bicycle, and must perform an emergency brake or an avoidance maneuver.
+Slow moving hazard at lane edge.
+The ego-vehicle encounters a slow moving hazard blocking part of the lane. 
+The ego-vehicle must brake or maneuver to avoid it next to a lane of traffic moving in the opposite direction.
 """
 
 import random
 import py_trees
 import carla
-import operator
-
-from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 from srunner.scenariomanager.scenarioatomics.atomic_behaviors import (ActorTransformSetter,
@@ -25,11 +22,14 @@ from srunner.scenariomanager.scenarioatomics.atomic_behaviors import (ActorTrans
                                                                       ActorDestroy,
                                                                       WaypointFollower,
                                                                       AccelerateToCatchUp,
-                                                                      ChangeActorTargetSpeed,
-                                                                      KeepVelocity
+                                                                      ChangeActorTargetSpeed
+                                                                       
                                                                       )
 from srunner.scenariomanager.scenarioatomics.atomic_criteria import CollisionTest
-from srunner.scenariomanager.scenarioatomics.atomic_trigger_conditions import InTriggerDistanceToVehicle, InTriggerDistanceToNextIntersection, DriveDistance,StandStill
+from srunner.scenariomanager.scenarioatomics.atomic_trigger_conditions import (InTriggerDistanceToVehicle,
+                                                                                InTriggerDistanceToNextIntersection,
+                                                                                RelativeVelocityToOtherActor,
+                                                                                  DriveDistance)
 from srunner.scenarios.basic_scenario import BasicScenario
 from srunner.tools.scenario_helper import get_waypoint_in_distance
 
@@ -41,11 +41,9 @@ class custom_7(BasicScenario):
     This is a single ego vehicle scenario
     """
 
-    timeout = 1200
+    timeout = 12000
 
-    def __init__(self, world, ego_vehicles, config, randomize=False, debug_mode=False, criteria_enable=True,
-                 timeout=60):
-
+    def __init__(self, world, ego_vehicles, config, randomize=False, debug_mode=False, criteria_enable=True, timeout=60):
         self.timeout = timeout
         self._map = CarlaDataProvider.get_map()
         self.timeout = timeout
@@ -55,7 +53,7 @@ class custom_7(BasicScenario):
         self._first_vehicle_speed = 10
         self._other_actor_stop_in_front_intersection = 10
         point = config.trigger_points[0].location
-        self._grp = GlobalRoutePlanner(CarlaDataProvider.get_map(), 2.0)
+        self._reference_waypoint = self._map.get_waypoint(point)
         super(custom_7, self).__init__("custom_7",
                                        ego_vehicles,
                                        config,
@@ -66,6 +64,8 @@ class custom_7(BasicScenario):
         self._attach_camera_to_ego()
 
     def _attach_camera_to_ego(self):
+        import os
+
         ego_vehicle = CarlaDataProvider.get_hero_actor()
         if ego_vehicle is None:
             raise ValueError("Ego vehicle with role_name 'hero' not found")
@@ -74,24 +74,42 @@ class custom_7(BasicScenario):
         bp_lib = world.get_blueprint_library()
 
         camera_bp = bp_lib.find('sensor.camera.rgb')
-        camera_bp.set_attribute('image_size_x', '1280')
-        camera_bp.set_attribute('image_size_y', '720')
+        camera_bp.set_attribute('image_size_x', '1920')
+        camera_bp.set_attribute('image_size_y', '1080')
         camera_bp.set_attribute('fov', '120')
+        camera_bp.set_attribute('sensor_tick', '0.1') # 20Hz
 
-        # Define camera on front hood
-        camera_transform = carla.Transform(carla.Location(x=1.5, z=2.4))
+        camera_transforms = {
+            'front': carla.Transform(carla.Location(x=1.5, z=2.4), carla.Rotation(pitch=0)),
+            'left': carla.Transform(carla.Location(x=0.0, y=-0.8, z=2.2), carla.Rotation(yaw=-90)),
+            'right': carla.Transform(carla.Location(x=0.0, y=0.8, z=2.2), carla.Rotation(yaw=90)),
+            'back': carla.Transform(carla.Location(x=-1.5, z=2.4), carla.Rotation(yaw=180))
+        }
 
-        # Spawn and attach sensor
-        camera = world.spawn_actor(camera_bp, camera_transform, attach_to=ego_vehicle)
-        camera.listen(lambda image: image.save_to_disk(f"_out/ego_{ego_vehicle.id}_%06d.png" % image.frame))
-        self._sensor_list.append(camera)
+        for view in camera_transforms.keys():
+            os.makedirs(f"_out/{view}", exist_ok=True)
+
+        for view, transform in camera_transforms.items():
+            camera = world.spawn_actor(camera_bp, transform, attach_to=ego_vehicle)
+            camera.listen(lambda image, view=view: image.save_to_disk(f"_out/{view}/ego_{ego_vehicle.id}_%06d.png" % image.frame))
+            self._sensor_list.append(camera)
     
     def _initialize_actors(self, config):
-        for actor in config.other_actors:
-            vehicle = CarlaDataProvider.request_new_actor(actor.model, actor.transform)
-            self.other_actors.append(vehicle)
-            vehicle.set_simulate_physics(enabled=True)
+        waypoint, _ = get_waypoint_in_distance(self._reference_waypoint, self._first_vehicle_location)
         
+        waypoint_left = waypoint.get_left_lane()
+        transform = waypoint_left.transform
+        transform.location.z += 0.5
+        transform.location.x += 20
+        tranform_ped = waypoint.transform
+        tranform_ped.location.z += 0.5
+        tranform_ped.location.x -= 5
+        first_vehicle = CarlaDataProvider.request_new_actor('vehicle.nissan.patrol', transform)
+
+        self.other_actors.append(first_vehicle)
+        self.adversary = CarlaDataProvider.request_new_actor('vehicle.diamondback.century', tranform_ped)
+        self.other_actors.append(self.adversary)
+
     def _create_behavior(self):
         """
         Order of sequence:
@@ -101,23 +119,32 @@ class custom_7(BasicScenario):
         - lane_change: change the lane
         - endcondition: drive for a defined distance
         """
+
         # car_visible
-          # let the other actor drive until next intersection
-        TriggerDist = py_trees.composites.Parallel(
-            "Intersection",
-            policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        TriggerDist.add_child(InTriggerDistanceToNextIntersection(self.ego_vehicles[0], distance=25))
+        # let the other actor drive until next intersection
         DriveStraight = py_trees.composites.Parallel(
             "DriveStraight",
             policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ONE)
-        DriveStraight.add_child(KeepVelocity(self.other_actors[0], 0.8))
-        DriveStraight.add_child(InTriggerDistanceToVehicle(self.other_actors[0], self.ego_vehicles[0], 50, comparison_operator=operator.gt))
-
+        DriveStraight.add_child(WaypointFollower(self.other_actors[0], 15))
+        DriveStraight.add_child(WaypointFollower(self.other_actors[1], 2))
+        DriveStraight.add_child(InTriggerDistanceToNextIntersection(
+            self.other_actors[0], self._other_actor_stop_in_front_intersection))
+        DriveStraight.add_child(RelativeVelocityToOtherActor(self.ego_vehicles[0],
+            self.adversary, 20))
+        #DriveStraight.add_child(ChangeActorTargetSpeed(self.other_actors[0],20))
         
+        # stop vehicle
+        # stop = StopVehicle(self.other_actors[0], 1.0)
+
+        # end condition
+        end = py_trees.composites.Parallel("ego reached intersection",
+                                                    policy=py_trees.common.ParallelPolicy.SUCCESS_ON_ALL)
+        end.add_child(InTriggerDistanceToNextIntersection(
+            self.ego_vehicles[0], 1))
+        # end condition
         sequence = py_trees.composites.Sequence("Sequence Behavior")
-        sequence.add_child(TriggerDist)
-        # sequence.add_child(end)
         sequence.add_child(DriveStraight)
+        sequence.add_child(end)
         sequence.add_child(ActorDestroy(self.other_actors[0]))
 
         return sequence
@@ -130,83 +157,7 @@ class custom_7(BasicScenario):
         collision_criterion = CollisionTest(self.ego_vehicles[0])
         criteria.append(collision_criterion)
         return criteria
-
-    def _create_construction_setup(self, start_transform, lane_width):
-        """
-        Create Construction Setup
-        """
-        _initial_offset = {'cones': {'yaw': 180, 'k': lane_width / 2.0},
-                           'warning_sign': {'yaw': 180, 'k': 5, 'z': 0},
-                           'debris': {'yaw': 0, 'k': 2, 'z': 1}}
-        _prop_names = {'warning_sign': 'static.prop.trafficwarning',
-                       'debris': 'static.prop.dirtdebris02'}
-
-        _perp_angle = 90
-        _setup = {'lengths': [0, 6, 3], 'offsets': [0, 2, 1]}
-        _z_increment = 0.1
-
-        # Traffic Warning and Debris
-        for key, value in _initial_offset.items():
-            if key == 'cones':
-                continue
-            transform = carla.Transform(
-                start_transform.location,
-                start_transform.rotation)
-            transform.rotation.yaw += value['yaw']
-            transform.location += value['k'] * \
-                transform.rotation.get_forward_vector()
-            transform.location.z += value['z']
-            transform.rotation.yaw += _perp_angle
-            static = CarlaDataProvider.request_new_actor(
-                _prop_names[key], transform)
-            static.set_simulate_physics(True)
-            self.other_actors.append(static)
-
-        # Cones
-        side_transform = carla.Transform(
-            start_transform.location,
-            start_transform.rotation)
-        side_transform.rotation.yaw += _perp_angle
-        side_transform.location -= _initial_offset['cones']['k'] * \
-            side_transform.rotation.get_forward_vector()
-        side_transform.rotation.yaw += _initial_offset['cones']['yaw']
-
-        for i in range(len(_setup['lengths'])):
-            self.create_cones_side(
-                side_transform,
-                forward_vector=side_transform.rotation.get_forward_vector(),
-                z_inc=_z_increment,
-                cone_length=_setup['lengths'][i],
-                cone_offset=_setup['offsets'][i])
-            side_transform.location += side_transform.get_forward_vector() * \
-                _setup['lengths'][i] * _setup['offsets'][i]
-            side_transform.rotation.yaw += _perp_angle
-
-    def create_cones_side(
-            self,
-            start_transform,
-            forward_vector,
-            z_inc=0,
-            cone_length=0,
-            cone_offset=0):
-        """
-        Creates One Side of the Cones
-        """
-        _dist = 0
-        while _dist < (cone_length * cone_offset):
-            # Move forward
-            _dist += cone_offset
-            forward_dist = carla.Vector3D(0, 0, 0) + forward_vector * _dist
-
-            location = start_transform.location + forward_dist
-            location.z += z_inc
-            transform = carla.Transform(location, start_transform.rotation)
-
-            cone = CarlaDataProvider.request_new_actor(
-                'static.prop.constructioncone', transform)
-            cone.set_simulate_physics(True)
-            self.other_actors.append(cone)
-
+    
     def __del__(self):
         """
         Remove all actors after deletion.
